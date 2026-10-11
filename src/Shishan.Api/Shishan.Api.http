@@ -1,0 +1,6 @@
+@Shishan.Api_HostAddress = http://localhost:5074
+
+GET {{Shishan.Api_HostAddress}}/weatherforecast/
+Accept: application/json
+
+###

@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>@ViewData["Title"] · 屎山挑战赛</title>
+    <link rel="stylesheet" href="~/css/site.css" asp-append-version="true" />
+</head>
+<body>
+    <nav class="navbar">
+        <div class="container nav-inner">
+            <a class="brand" href="/">屎山挑战赛 <small>风格 · AI 测试题库</small></a>
+            <div class="nav-links">
+                <a href="/">题库</a>
+                <span class="sep">·</span>
+                <a href="/api/topics">API</a>
+            </div>
+        </div>
+    </nav>
+    <main>
+        @RenderBody()
+    </main>
+    <footer class="footer">
+        <div class="container">
+            <p>本仓库为自制 AI 测试题库(形式借鉴同名赛事),仅供测试 AI 修复 BUG 的能力,非官方内容、无版权归属声明,结果仅供测试参考。</p>
+        </div>
+    </footer>
+    @await RenderSectionAsync("Scripts", required: false)
+</body>
+</html>

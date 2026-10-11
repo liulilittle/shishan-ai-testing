@@ -1,0 +1,47 @@
+@{
+    Layout = "_Layout";
+    ViewData["Title"] = "屎山挑战赛 · 题库";
+}
+<div class="container">
+    <header class="hero">
+        <h1>屎山挑战赛 <span>风格 · AI 测试题库</span></h1>
+        <p class="sub">钻石 / 王者 · BUG 修复验证台 —— 改对就进球,改不对打在门框或偏出</p>
+    </header>
+
+    <section class="tier-bar">
+        <div class="tier diamond">钻石 DIAMOND · 5 题</div>
+        <div class="tier king">王者 KING · 5 题</div>
+    </section>
+
+    <section id="topic-grid" class="topic-grid">
+        <div class="loading">正在加载题库…</div>
+    </section>
+</div>
+
+@section Scripts {
+<script>
+    async function loadTopics() {
+        const res = await fetch('/api/topics');
+        const topics = await res.json();
+        const grid = document.getElementById('topic-grid');
+        grid.innerHTML = '';
+        topics.forEach(t => {
+            const tier = t.tier === '王者' ? 'king' : 'diamond';
+            const card = document.createElement('div');
+            card.className = 'topic-card ' + tier;
+            card.innerHTML = `
+                <div class="card-head">
+                    <span class="code">${t.code}</span>
+                    <span class="cat">${t.category}</span>
+                </div>
+                <h3>${t.title}</h3>
+                <p class="phenomenon">${t.phenomenon}</p>
+                <div class="dims">${t.dimensions.map(d => `<span class="dim">${d}</span>`).join('')}</div>
+                <a class="btn" href="/Home/Topic/${t.code}">进入验证台 →</a>
+            `;
+            grid.appendChild(card);
+        });
+    }
+    loadTopics();
+</script>
+}

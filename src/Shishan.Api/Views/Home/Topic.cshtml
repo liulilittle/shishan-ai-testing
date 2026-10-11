@@ -1,0 +1,497 @@
+@{
+    Layout = "_Layout";
+    ViewData["Title"] = "题目详情";
+}
+<div class="container topic-detail">
+    <a class="back-link" href="/">← 返回题库</a>
+    <div id="topic-body" class="loading">正在加载题目…</div>
+
+    <div class="verify-row">
+        <button id="verifyBtn" class="btn" onclick="runVerify()">⚽ 验证修复</button>
+        <span id="verifyStatus" class="dim-label">点击按钮运行该题单元测试</span>
+    </div>
+
+    <div class="pitch" id="pitch">
+        <div class="pitch-grass"></div>
+        <div class="goal" id="goal">
+            <div class="goal-net" id="goalNet"></div>
+            <div class="goal-bar post-left"></div>
+            <div class="goal-bar crossbar"></div>
+            <div class="goal-bar ground"></div>
+        </div>
+        <div class="ball" id="ball"></div>
+        <div class="sparks" id="sparks"></div>
+        <div class="hit-flash" id="hitFlash"></div>
+        <div class="goal-flash" id="goalFlash"></div>
+        <div class="goal-text" id="goalText">GOAL!</div>
+    </div>
+
+    <div class="run-progress" id="runProgress"></div>
+
+    <div class="result-bar" id="resultBar" style="display:none">
+        <div class="green"><div class="num" id="greenNum">0</div><div class="label">通过</div></div>
+        <div class="red"><div class="num" id="redNum">0</div><div class="label">失败</div></div>
+        <div><div class="num" id="totalNum">0</div><div class="label">总计</div></div>
+    </div>
+
+    <div class="case-list" id="caseList" style="display:none"></div>
+</div>
+
+@section Scripts {
+<script>
+    const code = '@ViewBag.TopicCode';
+    let verifyRunning = false;
+    let eventSource = null;
+    let finished = false;
+    let startTime = 0;
+    let elapsedTimer = null;
+
+    // ---- Shot outcome metadata (status text + trail duration only) ----
+    // Ball motion is a real projectile simulation (see physics engine below), NOT CSS keyframes.
+    const SHOTS = {
+        goal:      { dur: '900ms',  status: '全绿 —— ⚽ 球进了!所有测试通过' },
+        postLeft:  { dur: '820ms',  status: '打中左门柱 —— 差一点点' },
+        postRight: { dur: '820ms',  status: '打中右门柱 —— 差一点点' },
+        crossbar:  { dur: '820ms',  status: '打中横梁 —— 差点运气' },
+        wideLeft:  { dur: '1000ms', status: '偏出左门 —— 还没改对' },
+        wideRight: { dur: '1000ms', status: '偏出右门 —— 还没改对' },
+        overTop:   { dur: '1000ms', status: '高出横梁 —— 还没改对' }
+    };
+
+    async function loadTopic() {
+        const res = await fetch('/api/topics/' + code);
+        const t = await res.json();
+        document.getElementById('topic-body').innerHTML = `
+            <div class="topic-meta">
+                <span class="code">${t.code}</span>
+                <span class="cat">${t.tier} · ${t.category}</span>
+            </div>
+            <h2>${t.title}</h2>
+            <p class="scenario">${t.scenario}</p>
+            <div class="phenomenon">现象:${t.phenomenon}</div>
+            <div class="expected">期望:${t.expected}</div>
+            <div class="dim-label">考核维度:${t.dimensions.join(' / ')}</div>
+        `;
+        document.title = `${t.code} · ${t.title} · 屎山挑战赛`;
+    }
+
+    function resetPitch() {
+        stopPhysics();
+        const pitch = document.getElementById('pitch');
+        pitch.className = 'pitch';
+        const ball = document.getElementById('ball');
+        ball.className = 'ball';
+        ball.removeAttribute('style');
+        document.getElementById('goal').className = 'goal';
+        document.getElementById('goalNet').className = 'goal-net';
+        document.getElementById('sparks').className = 'sparks';
+        document.getElementById('hitFlash').className = 'hit-flash';
+        document.getElementById('goalFlash').className = 'goal-flash';
+        document.getElementById('goalText').className = 'goal-text';
+        document.getElementById('resultBar').style.display = 'none';
+        document.getElementById('caseList').style.display = 'none';
+        ['--dur'].forEach(v => pitch.style.removeProperty(v));
+    }
+
+    function updateCounts(g, r, t) {
+        const gn = document.getElementById('greenNum');
+        const rn = document.getElementById('redNum');
+        const tn = document.getElementById('totalNum');
+        if (gn.textContent !== String(g)) bump(gn);
+        if (rn.textContent !== String(r)) bump(rn);
+        gn.textContent = g;
+        rn.textContent = r;
+        tn.textContent = t;
+    }
+
+    function bump(el) {
+        el.classList.remove('bump');
+        void el.offsetWidth;
+        el.classList.add('bump');
+    }
+
+    const rowIndex = {};
+
+    function addCase(name, passed) {
+        const list = document.getElementById('caseList');
+        let row = rowIndex[name];
+        if (!row) {
+            row = document.createElement('div');
+            row.className = 'case-row';
+            row.innerHTML = '<span class="dot"></span><span class="case-name"></span><span class="case-msg"></span>';
+            list.appendChild(row);
+            rowIndex[name] = row;
+        }
+        row.className = 'case-row ' + (passed ? 'pass' : 'fail');
+        row.querySelector('.case-name').textContent = name;
+        row.querySelector('.case-msg').textContent = passed ? '通过' : '失败';
+        row.classList.remove('enter');
+        void row.offsetWidth;
+        row.classList.add('enter');
+    }
+
+    function cleanup() {
+        finished = true;
+        verifyRunning = false;
+        stopProgress();
+        document.getElementById('verifyBtn').disabled = false;
+        if (eventSource) { eventSource.close(); eventSource = null; }
+    }
+
+    function startProgress() {
+        const status = document.getElementById('verifyStatus');
+        status.innerHTML = '<span class="spinner"></span> 正在编译并运行测试… 0s';
+        document.getElementById('runProgress').classList.add('show');
+        startTime = Date.now();
+        if (elapsedTimer) clearInterval(elapsedTimer);
+        elapsedTimer = setInterval(function () {
+            if (finished) return;
+            const s = Math.floor((Date.now() - startTime) / 1000);
+            status.innerHTML = '<span class="spinner"></span> 正在编译并运行测试… ' + s + 's';
+        }, 1000);
+    }
+
+    function stopProgress() {
+        if (elapsedTimer) { clearInterval(elapsedTimer); elapsedTimer = null; }
+        document.getElementById('runProgress').classList.remove('show');
+    }
+
+    // ---- Real projectile physics for the shot animation ----
+    // Each kick gets an initial velocity aimed at an outcome target. A symplectic
+    // integrator then applies gravity + air drag (speed decay) and bounces the ball
+    // off the goal frame, so success enters the net and failures fly out or rebound.
+
+    const PHYS = {
+        g: 1100,          // px/s^2 downward
+        drag: 0.9,        // exponential velocity decay /s
+        groundRest: .42,  // vertical bounce after landing
+        barRest: .46,     // frame bar bounce (normal component)
+        barFriction: .6,  // tangential speed kept after a bar hit (impact energy loss)
+        groundFriction: .88,
+        rollStop: 22,     // px/s below which the ball settles
+        netDrag: 9,       // strong absorption once inside the net
+        R: 17             // ball radius px
+    };
+    let physicsRAF = null;
+
+    function readPitchGeometry() {
+        const pitch = document.getElementById('pitch');
+        const cs = getComputedStyle(pitch);
+        const num = n => parseFloat(cs.getPropertyValue(n)) || 0;
+        const goalW = num('--goal-w'), goalH = num('--goal-h'),
+              goalRight = num('--goal-right'), goalTop = num('--goal-top'),
+              post = num('--post');
+        const gR = pitch.clientWidth - goalRight;
+        const gL = gR - goalW;
+        const gT = goalTop;
+        const gB = goalTop + goalH;
+        return {
+            W: pitch.clientWidth,
+            H: pitch.clientHeight,
+            gL, gR, gT, gB, post, gW: goalW, gH: goalH,
+            groundY: goalTop + goalH + 34,   // ball centre line when at rest on grass
+            startX: pitch.clientWidth * .14
+        };
+    }
+
+    // Launch velocity that lands the ball on (tx, ty) at time T under linear drag:
+    //   x(T) = x0 + (vx/k)(1-e^{-kT})   (closed form, matches the integrator)
+    function launchVelocity(x0, y0, tx, ty, T, g, k) {
+        const e = Math.exp(-k * T);
+        const vx = k * (tx - x0) / (1 - e);
+        const vy = g / k + k * ((ty - y0) - (g / k) * T) / (1 - e);
+        return { vx, vy };
+    }
+
+    function collideCircleRect(ball, rect, rest, fric) {
+        const cx = Math.max(rect.x, Math.min(ball.x, rect.x + rect.w));
+        const cy = Math.max(rect.y, Math.min(ball.y, rect.y + rect.h));
+        const dx = ball.x - cx, dy = ball.y - cy;
+        const d2 = dx * dx + dy * dy;
+        if (d2 > ball.r * ball.r) return false;
+        const d = Math.sqrt(d2);
+        let nx, ny;
+        if (d > 1e-4) {
+            nx = dx / d; ny = dy / d;
+        } else {
+            const left = ball.x - rect.x, right = rect.x + rect.w - ball.x;
+            const top = ball.y - rect.y, bot = rect.y + rect.h - ball.y;
+            const m = Math.min(left, right, top, bot);
+            if (m === left) { nx = -1; ny = 0; } else if (m === right) { nx = 1; ny = 0; }
+            else if (m === top) { nx = 0; ny = -1; } else { nx = 0; ny = 1; }
+        }
+        const pen = ball.r - d;
+        ball.x += nx * pen;
+        ball.y += ny * pen;
+        const vn = ball.vx * nx + ball.vy * ny;
+        if (vn < 0) {
+            // reflect the normal component, decay the tangential one (impact energy loss)
+            const tx = -ny, ty = nx;
+            const vt = ball.vx * tx + ball.vy * ty;
+            const vn2 = -vn * rest, vt2 = vt * fric;
+            ball.vx = vn2 * nx + vt2 * tx;
+            ball.vy = vn2 * ny + vt2 * ty;
+        }
+        return true;
+    }
+
+    function animateBall(ball, plan) {
+        const pitch = document.getElementById('pitch');
+        const geom = readPitchGeometry();
+        const ballObj = {
+            x: geom.startX, y: geom.groundY, r: PHYS.R,
+            vx: plan.vx, vy: plan.vy
+        };
+        let last = performance.now();
+        let acc = 0;
+        let elapsed = 0;
+        let inNet = false;
+        let bounceReported = false;
+        let spin = 0;
+        let settled = false;
+        const STEP = 1 / 200;   // fixed physics tick: keeps target-aim exact + no tunneling
+
+        const bars = [
+            { x: geom.gL, y: geom.gT, w: geom.gW, h: geom.post },       // crossbar
+            { x: geom.gR - geom.post, y: geom.gT, w: geom.post, h: geom.gH }, // back upright
+            { x: geom.gL, y: geom.gB - geom.post, w: geom.gW, h: geom.post } // ground rail
+        ];
+
+        function tick() {
+            // standard fixed-timestep accumulator (NEWTONIAN GAME LOOP)
+            ballObj.vy += PHYS.g * STEP;
+            const damp = Math.exp(-PHYS.drag * STEP);
+            ballObj.vx *= damp;
+            ballObj.vy *= damp;
+
+            if (inNet) {
+                const netDamp = Math.exp(-PHYS.netDrag * STEP);
+                ballObj.vx *= netDamp;
+                ballObj.vy *= netDamp;
+                // clamp inside the goal box, never a perpetual fall
+                ballObj.x = Math.max(geom.gL + geom.post, Math.min(ballObj.x, geom.gR - geom.post));
+                ballObj.y = Math.max(geom.gT + geom.post, Math.min(ballObj.y, geom.gB - geom.post));
+                if (ballObj.vy > 0 && ballObj.y < geom.gB - geom.post) ballObj.vy = Math.min(ballObj.vy, 28);
+            }
+
+            ballObj.x += ballObj.vx * STEP;
+            ballObj.y += ballObj.vy * STEP;
+
+            let touching = false;
+            if (!inNet && plan.frame) {
+                for (const bar of bars) {
+                    if (collideCircleRect(ballObj, bar, PHYS.barRest, PHYS.barFriction)) {
+                        touching = true;
+                        if (!bounceReported) {
+                            bounceReported = true;
+                            if (plan.onBounce) plan.onBounce(geom, ballObj.x, ballObj.y);
+                        }
+                    }
+                }
+            }
+
+            if (!inNet && ballObj.y >= geom.groundY) {
+                ballObj.y = geom.groundY;
+                if (ballObj.vy > 0) ballObj.vy = -ballObj.vy * PHYS.groundRest;
+                ballObj.vx *= PHYS.groundFriction;
+            }
+
+            // Entering the net: only a successful shot crosses the open mouth and is caught.
+            if (plan.allowNet && !inNet && ballObj.vx > 0 && ballObj.x > geom.gL + geom.post &&
+                ballObj.y > geom.gT + geom.post && ballObj.y < geom.gB - geom.post) {
+                inNet = true;
+                ballObj.x = Math.max(ballObj.x, geom.gL + geom.post);
+                if (plan.onGoal) plan.onGoal(geom);
+            }
+
+            // Stop when rolling on the ground, caught in the net, resting on the
+            // frame after a rebound, or out of view.
+            const rolling = ballObj.y >= geom.groundY - .5 && Math.abs(ballObj.vy) < 60;
+            const slow = Math.abs(ballObj.vx) < PHYS.rollStop && Math.abs(ballObj.vy) < PHYS.rollStop;
+            const caught = inNet && Math.abs(ballObj.vx) < 2 && Math.abs(ballObj.vy) < 12;
+            const resting = touching && slow;
+            const gone = ballObj.x > geom.W + PHYS.R || ballObj.y < -PHYS.R * 2;
+            if ((rolling && slow) || caught || resting || gone) {
+                ballObj.vx = 0; ballObj.vy = 0; settled = true;
+            }
+        }
+
+        function step(now) {
+            let dt = (now - last) / 1000;
+            if (dt <= 0) { physicsRAF = requestAnimationFrame(step); return; }
+            dt = Math.min(dt, 1 / 30);
+            last = now;
+            acc += dt;
+            elapsed += dt;
+            if (elapsed > 4) settled = true;   // safety settle: never let a rebound jitter forever
+            while (acc >= STEP && !settled) { tick(); acc -= STEP; }
+            spin += (ballObj.vx * dt) / PHYS.R * 180 / Math.PI * .55;
+            ball.style.left = ballObj.x + 'px';
+            ball.style.top = ballObj.y + 'px';
+            ball.style.transform = 'rotate(' + spin.toFixed(1) + 'deg)';
+            if (settled) { ball.classList.remove('flying'); return; }
+            physicsRAF = requestAnimationFrame(step);
+        }
+        physicsRAF = requestAnimationFrame(step);
+    }
+
+    function stopPhysics() {
+        if (physicsRAF) { cancelAnimationFrame(physicsRAF); physicsRAF = null; }
+    }
+
+    function playOutcome(outcome, statusText) {
+        const shot = SHOTS[outcome] || SHOTS.overTop;
+        const pitch = document.getElementById('pitch');
+        const ball = document.getElementById('ball');
+
+        stopPhysics();
+        pitch.style.setProperty('--dur', shot.dur);
+        // reset all effect classes so a replay starts clean
+        document.getElementById('goal').className = 'goal';
+        document.getElementById('goalNet').className = 'goal-net';
+        document.getElementById('sparks').className = 'sparks';
+        document.getElementById('hitFlash').className = 'hit-flash';
+        document.getElementById('goalFlash').className = 'goal-flash';
+        document.getElementById('goalText').className = 'goal-text';
+        pitch.classList.remove('celebrate');
+
+        const geom = readPitchGeometry();
+        const startY = geom.groundY;
+        const g = PHYS.g, k = PHYS.drag;
+
+        const plan = {
+            onGoal: function (gx) {
+                document.getElementById('goalFlash').classList.add('show');
+                document.getElementById('goalNet').classList.add('shake');
+                document.getElementById('goalText').classList.add('show');
+                pitch.classList.add('celebrate');
+            },
+            onBounce: function (gx, hx, hy) {
+                // spark + flash at the REAL impact point, goal shakes
+                const sp = document.getElementById('sparks');
+                const hf = document.getElementById('hitFlash');
+                sp.style.left = hx + 'px'; sp.style.top = hy + 'px';
+                hf.style.left = hx + 'px'; hf.style.top = hy + 'px';
+                document.getElementById('goal').classList.add(outcome === 'crossbar' ? 'shake-v' : 'clang');
+                sp.classList.add('show');
+                hf.classList.add('show');
+            }
+        };
+
+        let tx, ty, vx, vy, allowNet = false;
+        const goalCentre = geom.gL + geom.gW / 2;
+        const frameShot = outcome === 'postLeft' || outcome === 'postRight' || outcome === 'crossbar';
+
+        if (outcome === 'goal') {
+            allowNet = true;
+            tx = geom.gR - 60;               // settle near the back of the net
+            ty = geom.gT + geom.gH * .5;
+        } else if (outcome === 'postLeft') {
+            // clip the low near-side of the frame (ground rail) and rebound
+            tx = geom.gL + 4;
+            ty = geom.gB - 8;
+        } else if (outcome === 'postRight') {
+            // strike the back upright mid-height; rebound dies on the goal line
+            tx = geom.gR - geom.post - 12;
+            ty = geom.gT + geom.gH * .667;
+        } else if (outcome === 'crossbar') {
+            // clip the front-top corner of the frame; rebounds back into the field
+            tx = geom.gL + 26;
+            ty = geom.gT + geom.post * .5;
+        } else if (outcome === 'wideLeft') {
+            tx = geom.gL - geom.gW * .28;
+            ty = startY;
+        } else if (outcome === 'wideRight') {
+            // high flat shot that clears the bar and flies out past the right side
+            tx = geom.gR + geom.gW * .5;
+            ty = geom.gT + geom.gH * .42;
+        } else { // overTop
+            tx = goalCentre;
+            ty = geom.gT - geom.gH * .6;     // clears the bar and exits overhead
+        }
+
+        const T = outcome === 'goal' ? .95 : outcome === 'overTop' ? .85 :
+                  outcome === 'postRight' ? .82 : outcome === 'crossbar' ? .85 :
+                  outcome === 'wideRight' ? 1.0 : .9;
+        const v = launchVelocity(geom.startX, startY, tx, ty, T, g, k);
+        vx = v.vx; vy = v.vy;
+
+        ball.className = 'ball flying';
+        ball.style.left = geom.startX + 'px';
+        ball.style.top = startY + 'px';
+        ball.style.transform = 'rotate(0deg)';
+        void ball.offsetWidth;
+
+        document.getElementById('verifyStatus').textContent = statusText || shot.status;
+        animateBall(ball, { vx, vy, frame: frameShot, allowNet: allowNet, onGoal: plan.onGoal, onBounce: plan.onBounce });
+    }
+
+    function runVerify() {
+        if (verifyRunning) return;
+        verifyRunning = true;
+        finished = false;
+
+        const btn = document.getElementById('verifyBtn');
+        const status = document.getElementById('verifyStatus');
+        btn.disabled = true;
+        startProgress();
+        resetPitch();
+
+        for (const k in rowIndex) delete rowIndex[k];
+        const list = document.getElementById('caseList');
+        list.style.display = 'block';
+        list.innerHTML = '<div class="case-row head"><strong>单元测试结果(实时)</strong></div>';
+
+        let green = 0, red = 0, total = 0;
+        updateCounts(0, 0, 0);
+        document.getElementById('resultBar').style.display = 'flex';
+
+        eventSource = new EventSource('/api/topics/' + code + '/verify/stream');
+
+        eventSource.addEventListener('case', function (e) {
+            if (!e.data) return;
+            let c;
+            try { c = JSON.parse(e.data); } catch { return; }
+            total += 1;
+            if (c.passed) green += 1; else red += 1;
+            updateCounts(green, red, total);
+            addCase(c.name, c.passed);
+        });
+
+        eventSource.addEventListener('summary', function (e) {
+            if (finished) return;
+            let s = null;
+            try { s = JSON.parse(e.data); } catch { }
+            if (s) {
+                updateCounts(s.passed, s.failed, s.total);
+                cleanup();
+                if (s.total === 0) {
+                    // empty result: still give the user a clear "missed" animation
+                    playOutcome('overTop', '未检测到测试用例(可能尚未构建或未产生结果)');
+                } else {
+                    playOutcome(s.outcome);
+                }
+            } else {
+                cleanup();
+                playOutcome('overTop', '验证返回数据异常');
+            }
+        });
+
+        eventSource.addEventListener('error', function (e) {
+            if (finished) return;
+            if (e && e.data) {
+                let msg = '未知错误';
+                try { msg = JSON.parse(e.data).message || msg; } catch { }
+                cleanup();
+                playOutcome('overTop', '验证失败:' + msg);
+            } else {
+                // transport-level error: EventSource would auto-reconnect, so stop it
+                cleanup();
+                playOutcome('overTop', '连接中断,请重试');
+            }
+        });
+    }
+
+    loadTopic();
+</script>
+}

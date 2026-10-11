@@ -1,0 +1,26 @@
+# ---- build artifacts ----
+[Bb]in/
+[Oo]bj/
+[Oo]ut/
+TestResults/
+*.trx
+*.binlog
+*.log
+
+# ---- IDE / editor ----
+.vs/
+.idea/
+.vscode/
+*.user
+*.suo
+
+# ---- AI / agent internal working files (not part of the deliverable) ----
+.opencode/
+docs/superpowers/
+
+# ---- OS ----
+Thumbs.db
+.DS_Store
+
+# ---- misc ----
+node_modules/
